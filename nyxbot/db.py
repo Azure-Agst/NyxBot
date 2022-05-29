@@ -168,4 +168,4 @@ def search_db(query: str):
         )
 
         # return results
-        return results[:5]
+        return results[:9]

@@ -6,12 +6,21 @@ from typing import Optional
 from ..db import search_db
 from ..discord import EmbedColors
 
+NUMBER_LOOKUP_TABLE = [
+    ":keycap_1:", ":keycap_2:", ":keycap_3:",
+    ":keycap_4:", ":keycap_5:", ":keycap_6:",
+    ":keycap_7:", ":keycap_8:", ":keycap_9:",
+]
+
 class Music(commands.Cog):
     """Cog which holds the music commands"""
 
     def __init__(self, bot):
         self.bot = bot
         self.volume = 0.2
+        self.latest_prompt_id = None
+        self.latest_prompt_ctx = None
+        self.latest_prompt_data = []
 
     #
     # ===== [ Private Functions ] =====
@@ -32,7 +41,7 @@ class Music(commands.Cog):
             ctx.voice_client.stop()
             await ctx.voice_client.disconnect()
     
-    async def _play_file(self, ctx, path: str):
+    async def _play_file(self, ctx, db_entry):
         """Plays a file, given a path"""
 
         # make sure we're in a voice channel
@@ -40,7 +49,7 @@ class Music(commands.Cog):
             await self._join_channel(ctx, ctx.author.voice.channel)
 
         # get the first song and play it
-        audio_source = discord.FFmpegPCMAudio(path)
+        audio_source = discord.FFmpegPCMAudio(db_entry['path'])
 
         # create a volume transformer
         volume_ctrl = discord.PCMVolumeTransformer(
@@ -53,6 +62,13 @@ class Music(commands.Cog):
             volume_ctrl,
             after=lambda e: print(f'Player error: {e}') if e else None
         )
+
+        # print an embed, saying that we're playing
+        await ctx.send(embed=discord.Embed(
+            title = "Now Playing:",
+            description = f"{db_entry['artist']} - {db_entry['title']}",
+            color = EmbedColors.SUCCESS
+        ))
 
     #
     # ===== [ Commands ] =====
@@ -160,19 +176,40 @@ class Music(commands.Cog):
             # if we found a song, play it
             if results:
 
-                # if in a song, stop it
-                if ctx.voice_client and ctx.voice_client.is_playing():
-                    ctx.voice_client.stop()
-                
-                # play the song
-                await self._play_file(ctx, results[0]['path'])
+                # if more than one result, send a prompt embed
+                if len(results) > 1:
+                    
+                    # format embed string
+                    e_str = ""
+                    for i, v in enumerate(results):
+                        e_str += f"**{i + 1}.)** {v['artist']} - {v['title']}\n"
 
-                # print an embed, saying that we're playing
-                await ctx.send(embed=discord.Embed(
-                    title = "Now Playing:",
-                    description = f"{results[0]['artist']} - {results[0]['title']}",
-                    color = EmbedColors.SUCCESS
-                ))
+                    # cache these results
+                    self.latest_prompt_ctx = ctx
+                    self.latest_prompt_data = results
+
+                    # send embed
+                    self.latest_prompt_message = await ctx.send(embed=discord.Embed(
+                        title = "Multiple results found! Please select one:",
+                        description = e_str,
+                        color = EmbedColors.LIGHT
+                    ))
+
+                    # add reactions
+                    for i in range(len(results)):
+                        await self.latest_prompt_message.add_reaction(
+                            emoji.emojize(NUMBER_LOOKUP_TABLE[i])
+                        )
+
+                # if there's only one song in the results, play it
+                else:
+
+                    # if in a song, stop it
+                    if ctx.voice_client and ctx.voice_client.is_playing():
+                        ctx.voice_client.stop()
+                    
+                    # play the song
+                    await self._play_file(ctx, results[0])
 
             # if we couldnt find a song, send an embed
             else:
@@ -289,6 +326,62 @@ class Music(commands.Cog):
                 emoji.emojize(':OK_hand:')
             )
 
+    #
+    # ===== [ Event Handlers ] =====
+    #
+
+    @commands.Cog.listener()
+    async def on_reaction_add(self, reaction, user):
+        """Listener to handle prompts"""
+
+        # ignore bots :)
+        if user.bot:
+            return
+
+        # if the message is the latest prompt message...
+        if reaction.message.id == self.latest_prompt_message.id:
+
+            # if the reaction is a number...
+            emote_str = emoji.demojize(str(reaction.emoji))
+            if emote_str in NUMBER_LOOKUP_TABLE:
+
+                # get the index of the reaction
+                index = NUMBER_LOOKUP_TABLE.index(emote_str)
+
+                # if the index is within the range of the results...
+                if index < len(self.latest_prompt_data):
+
+                    # if already playing, stop it
+                    if self.latest_prompt_ctx.voice_client and \
+                        self.latest_prompt_ctx.voice_client.is_playing():
+                        self.latest_prompt_ctx.voice_client.stop()
+
+                    # play the song
+                    await self._play_file(
+                        self.latest_prompt_ctx,
+                        self.latest_prompt_data[index]
+                    )
+
+                    # delete the message
+                    await self.latest_prompt_message.delete()
+
+                    # clear the cache
+                    self.latest_prompt_id = None
+                    self.latest_prompt_ctx = None
+                    self.latest_prompt_data = None
+
+                # if the index is not within the range of the results...
+                else:
+
+                    # remove the reaction
+                    await reaction.remove(user)
+
+            # if the reaction is not a number...
+            else:
+
+                # remove the reaction
+                await reaction.remove(user)
+    
 
 def setup(bot):
     bot.add_cog(Music(bot))
