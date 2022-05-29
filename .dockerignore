@@ -1,0 +1,35 @@
+# Virtualenv
+venv/
+.venv/
+
+# Envfiles
+.*env*
+
+# /var/lib Sim Folder
+varlib/
+
+# Python caches
+*.pyc
+__pycache__/
+
+# Whatever this is
+instance/
+
+# To be honest the flask docs said I should
+# ignore the following, so I am.
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Final ignores
+dist/
+build/
+*.egg-info/
+
+# vs code
+.vscode/
+.DS_Store
+
+# temp test files
+run_docker.sh
+test.sh
