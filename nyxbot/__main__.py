@@ -9,7 +9,6 @@ def main():
     """Main function"""
 
     print("Starting Music Player...")
-    print(env)
 
     # check config
     validate_config()
