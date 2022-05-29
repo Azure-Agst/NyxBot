@@ -3,7 +3,7 @@ FROM python:3
 
 # Labels
 LABEL org.opencontainers.image.authors="me@azureagst.dev"
-LABEL org.opencontainers.image.source="https://github.com/Azure-Agst/NyxBox"
+LABEL org.opencontainers.image.source="https://github.com/Azure-Agst/NyxBot"
 
 # Set working dir
 WORKDIR /usr/src/smbot
