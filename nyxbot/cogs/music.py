@@ -2,13 +2,17 @@ import emoji
 import random
 import asyncio
 import discord
+import logging
 import itertools
 from typing import Optional
 from discord.ext import commands
 from async_timeout import timeout
 
 from ..db import search_db
+from ..util.decorators import ensure_bot_in_channel
 from ..discord import EmbedColors
+
+musicLogger = logging.getLogger('NyxBot.cogs.Music')
 
 NUMBER_LOOKUP_TABLE = [
     ":keycap_1:", ":keycap_2:", ":keycap_3:",
@@ -17,6 +21,8 @@ NUMBER_LOOKUP_TABLE = [
 ]
 
 class SongQueue(asyncio.Queue):
+    """Custom implementation of queue with helper functions for songs"""
+
     def __getitem__(self, item):
         if isinstance(item, slice):
             return list(itertools.islice(self._queue, item.start, item.stop, item.step))
@@ -39,7 +45,7 @@ class SongQueue(asyncio.Queue):
         del self._queue[index]
 
 class Music(commands.Cog):
-    """Cog which holds the music commands"""
+    """Cog which holds the Music commands"""
 
     def __init__(self, bot):
 
@@ -55,7 +61,6 @@ class Music(commands.Cog):
         # audio player stuff
         self.audio_player_thread = None
         self.voice_client = None
-        self.invoked_ctx = None
         self.player_loop = False
         self.player_volume = 0.2
 
@@ -64,7 +69,6 @@ class Music(commands.Cog):
         self.start_next_song = asyncio.Event()
         self.song_queue = SongQueue(maxsize=10)
 
-    
     def __del__(self):
         self.audio_player_thread.cancel()
     
@@ -76,7 +80,7 @@ class Music(commands.Cog):
         """Main async task that handles playing songs"""
 
         # print that the audio player thread has started
-        print("_audio_player_task started!")
+        musicLogger.info("_audio_player_task started!")
 
         # put everything in a try block
         try:
@@ -96,7 +100,10 @@ class Music(commands.Cog):
                     try:
                         async with timeout(self.timeout):
                             self.current = await self.song_queue.get()
-                            print("Got next song!")
+                            musicLogger.info(
+                                "Got next song from queue! " + \
+                                f"{self.current['title']}"
+                            )
                     except asyncio.TimeoutError:
                         self.bot.loop.create_task(self._stop_audio_player())
                         return
@@ -109,9 +116,10 @@ class Music(commands.Cog):
 
                 # race condition check
                 if self.voice_client.is_playing():
-                    print(
-                        "Warning: Found weird race condition!\n" +\
-                        "Started next song while currently playing, idk why"
+                    musicLogger.critical(
+                        "Detected race condition: " + \
+                        "Started next song while already playing. " + \
+                        "Please ensure there is only one task running!"
                     )
 
                 # play the song
@@ -133,13 +141,13 @@ class Music(commands.Cog):
 
             # if it's a CancelledError, ignore it
             if type(e) is asyncio.CancelledError:
+                musicLogger.info("_audio_player_task interrupted! Exiting...")
                 return
             
-            # elsem its an actual error
-            print(
+            # else, its an actual error
+            musicLogger.critical(
                 "_audio_player_task error: " + \
-                type(e).__name__ + "\n" +\
-                "text: " + str(e)
+                type(e).__name__ + " - " + str(e)
             )
             raise
 
@@ -251,12 +259,12 @@ class Music(commands.Cog):
             pass
 
     #
-    # ===== [ Commands ] =====
+    # ===== [ Join & Leave Commands ] =====
     #
 
     @commands.command(name="join", aliases=["j"])
     async def _join(self, ctx, *, channel: Optional[discord.VoiceChannel]):
-        """Command: Joins a voice channel"""
+        """Makes NyxBot join the voice channel you're in"""
 
         # determine destination
         # if user is in a voice channel, use that
@@ -290,30 +298,25 @@ class Music(commands.Cog):
         await self._join_channel(ctx, channel)
 
     @commands.command(name="leave", aliases=["l", "dc"])
+    @ensure_bot_in_channel
     async def _leave(self, ctx):
-        """Leaves a voice channel"""
+        """Makes NyxBot join leave the voice channel it's in"""
 
-        # make sure we're in a voice channel
-        if ctx.voice_client is not None:
+        # disconnect
+        await self._leave_channel()
 
-            # disconnect
-            await self._leave_channel()
+        # and add a reaction!
+        await ctx.message.add_reaction(
+            emoji.emojize(':OK_hand:')
+        )
 
-            # and add a reaction!
-            await ctx.message.add_reaction(
-                emoji.emojize(':OK_hand:')
-            )
-
-        # if not, send an embed
-        else:
-            await ctx.send(embed=discord.Embed(
-                description = "I'm not in a channel right now!",
-                color = EmbedColors.DANGER
-            ))
+    #
+    # ===== [ Music Playing and Queuing Commands ] =====
+    #
 
     @commands.command(name="play", aliases=["p"])
     async def _play(self, ctx, *, query: Optional[str]):
-        """Play command"""
+        """Searches the NAS for a song, and plays it"""
 
         # Since p is both pause and play, add that logic here
         if query is None:
@@ -377,38 +380,37 @@ class Music(commands.Cog):
                 ))
 
     @commands.command(name="stop", aliases=["st"])
+    @ensure_bot_in_channel
     async def _stop(self, ctx):
-        """Stop playing command"""
+        """Stops playing music and clears the queue"""
 
-        # if we're in a channel...
-        if ctx.voice_client:
+        # clear the queue
+        for _ in range(self.song_queue.qsize()):
+            self.song_queue.get_nowait()
+            self.song_queue.task_done()
 
-            # clear the queue
-            for _ in range(self.song_queue.qsize()):
-                self.song_queue.get_nowait()
-                self.song_queue.task_done()
-
-            # stop the music...
-            ctx.voice_client.stop()
-            
-            # and add a reaction!
-            await ctx.message.add_reaction(
-                emoji.emojize(':stop_button:')
-            )
+        # stop the music...
+        ctx.voice_client.stop()
         
-        # if we're not in a channel, send an embed
-        else:
+        # and add a reaction!
+        await ctx.message.add_reaction(
+            emoji.emojize(':stop_button:')
+        )
+
+    @commands.command(name="pause")
+    @ensure_bot_in_channel
+    async def _pause(self, ctx):
+        """Pauses current song, if one is playing"""
+
+        # if we're already paused
+        if ctx.voice_state.is_paused():
             await ctx.send(embed=discord.Embed(
-                description = "I'm not playing anything right now!",
+                description = "I'm already paused!",
                 color = EmbedColors.DANGER
             ))
 
-    @commands.command(name="pause")
-    async def _pause(self, ctx):
-        """Pause command"""
-
-        # if we're in a channel...
-        if ctx.voice_state.is_playing():
+        # if we're playing something...
+        elif ctx.voice_state.is_playing():
 
             # pause the music...
             ctx.voice_client.pause()
@@ -417,17 +419,175 @@ class Music(commands.Cog):
             await ctx.message.add_reaction(
                 emoji.emojize(':pause_button:')
             )
-        
-        # if we're not in a channel, send an embed
+
+    @commands.command(name="clear", aliases=["c"])
+    @ensure_bot_in_channel
+    async def _clear(self, ctx):
+        """Clears the queue"""
+
+        # clear the queue
+        self.song_queue.clear()
+
+        # send an embed
+        await ctx.send(embed=discord.Embed(
+            description = "Queue cleared!",
+            color = EmbedColors.DARK
+        ))
+
+    @commands.command(name="skip", aliases=["s"])
+    @ensure_bot_in_channel
+    async def _skip(self, ctx):
+        """Skips the current song"""
+
+        # skip the current song
+        ctx.voice_client.stop()
+
+        # add a reaction!
+        await ctx.message.add_reaction(
+            emoji.emojize(':fast-forward_button:')
+        )
+
+    #
+    # ===== [ Song Metadata Commands ] =====
+    #
+
+    @commands.command(name="nowplaying", aliases=["np"])
+    @ensure_bot_in_channel
+    async def _nowplaying(self, ctx):
+        """Print the song that's currently playing"""
+
+        # if something is playing, send an embed
+        if ctx.voice_client.is_playing():
+            await ctx.send(embed=discord.Embed(
+                description = f"**Now Playing:**\n {self.current['artist']} - {self.current['title']}",
+                color = EmbedColors.DARK
+            ))
+
+        # if nothing is playing, send an embed
         else:
             await ctx.send(embed=discord.Embed(
                 description = "I'm not playing anything right now!",
                 color = EmbedColors.DANGER
             ))
 
+    @commands.command(name="queue", aliases=["q"])
+    @ensure_bot_in_channel
+    async def _queue(self, ctx):
+        """Print the current queue"""
+
+        # temp vars
+        embed_contents = ""
+        now_playing_str = ""
+        queue_str = ""
+
+        # if something is playing, get that
+        if ctx.voice_client.is_playing():
+            now_playing_str = f"**Now Playing:**\n {self.current['artist']} - {self.current['title']}"
+
+        # if there's stuff in the queue, get that too
+        if self.song_queue.qsize() == 0:
+            queue_str = "Queue is empty!"
+        else:
+            for i, song in enumerate(self.song_queue, start=0):
+                queue_str += f"**{i + 1}.)** {song['artist']} - {song['title']}\n"
+
+        # format embed contents
+        if now_playing_str != "":
+            embed_contents += now_playing_str + "\n\n"
+        embed_contents += "**Queue:**\n"
+        embed_contents += queue_str
+
+        # send embed
+        await ctx.send(embed=discord.Embed(
+            description = embed_contents,
+            color = EmbedColors.DARK
+        ))
+
+    #
+    # ===== [ Voice State Management Commands ] =====
+    #
+
+    @commands.command(name="loop")
+    @ensure_bot_in_channel
+    async def _loop(self, ctx):
+        """Toggles looping"""
+
+        # if looping is enabled, disable it
+        if self.player_loop:
+            self.player_loop = False
+            await ctx.send(embed=discord.Embed(
+                description = "Looping disabled!",
+                color = EmbedColors.DARK
+            ))
+
+        # if looping is disabled, enable it
+        else:
+            self.player_loop = True
+            await ctx.send(embed=discord.Embed(
+                description = "Looping enabled!",
+                color = EmbedColors.DARK
+            ))
+
+    @commands.command(name="shuffle", aliases=["sh"])
+    @ensure_bot_in_channel
+    async def _shuffle(self, ctx):
+        """Shuffle the queue"""
+
+        # shuffle the queue
+        self.song_queue.shuffle()
+
+        # send an embed
+        await ctx.send(embed=discord.Embed(
+            description = "Shuffled!",
+            color = EmbedColors.DARK
+        ))
+
+    @commands.command(name="volume", aliases=["v", "vol"])
+    @ensure_bot_in_channel
+    async def _volume(self, ctx, volume: Optional[int]):
+        """Print volume, or change if specified (0-100)"""
+
+        # if no volume was passed in, send an embed
+        if volume is None:
+            cur_volume = int(ctx.voice_client.source.volume * 100)
+            await ctx.send(embed=discord.Embed(
+                description = f"Current Volume: {cur_volume}%",
+                color = EmbedColors.DARK
+            ))
+
+        # if a volume was passed in, set it
+        else:
+
+            # for sume reason when i use my ensure_bot_in_channel deco,
+            # volume comes in as a string. cast to an int.
+            volume = int(volume)
+
+            # Make sure we're in a channel
+            if not ctx.voice_client:
+                await ctx.send("I am not in a voice channel!")
+
+            # Make sure we're within the range
+            if volume > 100 or volume < 0:
+                await ctx.send("Volume must be between 0 and 100!")
+                return
+            
+            # make changes
+            self.player_volume = volume / 100
+            if ctx.voice_client.source:
+                ctx.voice_client.source.volume = self.player_volume
+
+            # add a reaction!
+            await ctx.message.add_reaction(
+                emoji.emojize(':OK_hand:')
+            )
+
+    #
+    # ===== [ Database Commands ] =====
+    #
+
     @commands.command(name="search")
     async def _search(self, ctx, *, query: str):
-        """Search command"""
+        """Searches DB for songs"""
 
         # search for the songs
         results = search_db(query)
@@ -454,198 +614,6 @@ class Music(commands.Cog):
             await ctx.send(embed=discord.Embed(
                 description = "I couldn't find any songs that match your query!",
                 color = EmbedColors.DANGER
-            ))
-
-    @commands.command(name="volume", aliases=["v", "vol"])
-    async def _volume(self, ctx, volume: Optional[int]):
-        """Volume command"""
-
-        # if no volume was passed in, send an embed
-        if volume is None:
-            cur_volume = int(ctx.voice_client.source.volume * 100)
-            await ctx.send(embed=discord.Embed(
-                description = f"Current Volume: {cur_volume}%",
-                color = EmbedColors.DARK
-            ))
-
-        # if a volume was passed in, set it
-        else:
-
-            # Make sure we're in a channel
-            if not ctx.voice_client:
-                await ctx.send("I am not in a voice channel!")
-
-            # Make sure we're within the range
-            if volume > 100 or volume < 0:
-                await ctx.send("Volume must be between 0 and 100!")
-                return
-            
-            # make changes
-            self.player_volume = volume / 100
-            ctx.voice_client.source.volume = self.player_volume
-
-            # add a reaction!
-            await ctx.message.add_reaction(
-                emoji.emojize(':OK_hand:')
-            )
-
-    @commands.command(name="queue", aliases=["q"])
-    async def _queue(self, ctx):
-        """Queue command"""
-
-        # temp vars
-        embed_contents = ""
-        now_playing_str = ""
-        queue_str = ""
-
-        # if not in channel, error out
-        if not ctx.voice_client:
-            await ctx.send(embed=discord.Embed(
-                description = "I'm not in a voice channel!",
-                color = EmbedColors.DANGER
-            ))
-            return
-
-        # if something is playing, get that
-        if ctx.voice_client.is_playing():
-            now_playing_str = f"**Now Playing:**\n {self.current['artist']} - {self.current['title']}"
-
-        # if there's stuff in the queue, get that too
-        if self.song_queue.qsize() == 0:
-            queue_str = "Queue is empty!"
-        else:
-            for i, song in enumerate(self.song_queue, start=0):
-                queue_str += f"**{i + 1}.)** {song['artist']} - {song['title']}\n"
-
-        # format embed contents
-        if now_playing_str != "":
-            embed_contents += now_playing_str + "\n\n"
-        embed_contents += "**Queue:**\n"
-        embed_contents += queue_str
-
-        # send embed
-        await ctx.send(embed=discord.Embed(
-            description = embed_contents,
-            color = EmbedColors.DARK
-        ))
-
-    @commands.command(name="clear", aliases=["c"])
-    async def _clear(self, ctx):
-        """Clears the queue"""
-
-        # clear the queue
-        self.song_queue.clear()
-
-        # send an embed
-        await ctx.send(embed=discord.Embed(
-            description = "Queue cleared!",
-            color = EmbedColors.DARK
-        ))
-
-    @commands.command(name="skip", aliases=["s"])
-    async def _skip(self, ctx):
-        """Skip command"""
-
-        # if we're in a channel...
-        if ctx.voice_client:
-
-            # skip the current song
-            ctx.voice_client.stop()
-
-            # add a reaction!
-            await ctx.message.add_reaction(
-                emoji.emojize(':fast-forward_button:')
-            )
-
-        # if we're not in a channel, send an embed
-        else:
-            await ctx.send(embed=discord.Embed(
-                description = "I'm not playing anything right now!",
-                color = EmbedColors.DANGER
-            ))
-
-    @commands.command(name="nowplaying", aliases=["np"])
-    async def _nowplaying(self, ctx):
-        """Now Playing command"""
-
-        # if we're not in a channel, send an embed
-        if not ctx.voice_client:
-            await ctx.send(embed=discord.Embed(
-                description = "I'm not playing anything right now!",
-                color = EmbedColors.DANGER
-            ))
-            return
-
-        # if we're in a channel, handle
-        else:
-
-            # if something is playing, send an embed
-            if ctx.voice_client.is_playing():
-                await ctx.send(embed=discord.Embed(
-                    description = f"**Now Playing:**\n {self.current['artist']} - {self.current['title']}",
-                    color = EmbedColors.DARK
-                ))
-
-            # if nothing is playing, send an embed
-            else:
-                await ctx.send(embed=discord.Embed(
-                    description = "I'm not playing anything right now!",
-                    color = EmbedColors.DANGER
-                ))
-
-    @commands.command(name="loop")
-    async def _loop(self, ctx):
-        """Loop command"""
-
-        # if we're not in a channel, send an embed
-        if not ctx.voice_client:
-            await ctx.send(embed=discord.Embed(
-                description = "I'm not playing anything right now!",
-                color = EmbedColors.DANGER
-            ))
-            return
-
-        # if we're in a channel, handle
-        else:
-
-            # if looping is enabled, disable it
-            if self.player_loop:
-                self.player_loop = False
-                await ctx.send(embed=discord.Embed(
-                    description = "Looping disabled!",
-                    color = EmbedColors.DARK
-                ))
-
-            # if looping is disabled, enable it
-            else:
-                self.player_loop = True
-                await ctx.send(embed=discord.Embed(
-                    description = "Looping enabled!",
-                    color = EmbedColors.DARK
-                ))
-
-    @commands.command(name="shuffle", aliases=["sh"])
-    async def _shuffle(self, ctx):
-        """Shuffle command"""
-
-        # if we're not in a channel, send an embed
-        if not ctx.voice_client:
-            await ctx.send(embed=discord.Embed(
-                description = "I'm not playing anything right now!",
-                color = EmbedColors.DANGER
-            ))
-            return
-
-        # if we're in a channel, handle
-        else:
-
-            # shuffle the queue
-            self.song_queue.shuffle()
-
-            # send an embed
-            await ctx.send(embed=discord.Embed(
-                description = "Shuffled!",
-                color = EmbedColors.DARK
             ))
 
     #
@@ -698,7 +666,6 @@ class Music(commands.Cog):
 
                 # remove the reaction
                 await reaction.remove(user)
-    
 
 def setup(bot):
     bot.add_cog(Music(bot))

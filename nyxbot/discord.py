@@ -1,4 +1,5 @@
 import discord
+import logging
 from enum import Enum
 from datetime import datetime
 from discord.ext import commands
@@ -9,6 +10,8 @@ cogs = [
     "nyxbot.cogs.music",
     "nyxbot.cogs.dbadmin",
 ]
+
+botLogger = logging.getLogger('NyxBot.bot')
 
 class EmbedColors(int, Enum):
     """Main Color Enum, used in Discord embeds"""
@@ -34,20 +37,60 @@ class SMBot(commands.Bot):
             self.load_extension(cog)
 
     async def on_ready(self):
-        print(f"Logged in as {self.user}")
+        """Event: Bot is ready"""
+
+        # log ready
+        botLogger.info(f"Logged in as {self.user}")
+
+        # send embed
+        # sorry for this mess lol
         await self.get_channel(env.admin_channel) \
             .send(embed=discord.Embed(
                 description = "Started up at " + \
                     datetime.now().strftime("%m/%d/%Y, %H:%M:%S") + \
                     "! :white_check_mark:",
                 color = EmbedColors.INFO
-            )) # sorry for this mess lol
+            ))
 
     async def close(self):
+        """Event: Close the bot"""
+
+        # disconnect from all voice clients
         for vc in bot.voice_clients:
             await vc.disconnect()
-        print(f'Logged out of {bot.user}!')
+        
+        # log close
+        botLogger.info(f'Logged out of {bot.user}!')
 
+    async def on_command_error(self, ctx, error):
+        """Event: Error in command"""
+
+        # if command isn't found
+        if isinstance(error, commands.CommandNotFound):
+            await ctx.send(embed=discord.Embed(
+                description = "Command not found! " + \
+                    "Please check your syntax and try again.",
+                color = EmbedColors.DANGER
+            ))
+            return
+        
+        # if command is missing required arguments
+        elif isinstance(error, commands.MissingRequiredArgument):
+            await ctx.send(embed=discord.Embed(
+                description = "You're missing some arguments! " + \
+                    "Please check your syntax and try again.",
+                color = EmbedColors.DANGER
+            ))
+
+        # if other unhandled error occurs
+        else:
+            await ctx.send(embed=discord.Embed(
+                description = "An unhandled error occurred! " + \
+                    "Please contact the administrator.\n" + \
+                    f"Error: {error}",
+                color = EmbedColors.DANGER
+            ))
+            botLogger.error(f"Error in command {ctx.command}: {error}")
 
 intents = discord.Intents.default()
 status = discord.Game(
@@ -56,6 +99,7 @@ status = discord.Game(
 bot = SMBot(
     command_prefix=commands.when_mentioned_or(">"),
     description='Relatively simple music bot example',
+    help_command=commands.DefaultHelpCommand(),
     intents=intents,
     activity=status
 )

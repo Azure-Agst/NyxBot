@@ -2,21 +2,13 @@ import os
 import glob
 import sqlite3
 import difflib
+import logging
 from tinytag import TinyTag
 
 from .env import env, DB_NAME
+from .util.threading import to_thread
 
-_db_conn = None
-
-def _init_db_conn():
-    """Initializes the DB Connection"""
-
-    # initialize connection
-    global _db_conn
-    _db_conn = sqlite3.connect(
-        os.path.join(env.config_path, DB_NAME)
-    )
-    _db_conn.row_factory = sqlite3.Row
+dbLogger = logging.getLogger('NyxBot.db')
 
 def validate_config():
     """Verifies configs are valid, and initializes them if needed"""
@@ -24,19 +16,17 @@ def validate_config():
     # check to make sure config exists
     db_path = os.path.join(env.config_path, DB_NAME)
     if not os.path.exists(db_path):
-        print("Config not found. Creating...")
+        dbLogger.warning("Config not found. Creating...")
         _init_db()
-
-    # initialize connection
-    _init_db_conn()
 
 def _get_db_conn():
     """Makes a connection to the database"""
 
     # connect to database
-    global _db_conn
-    if _db_conn is None:
-        _init_db_conn()
+    _db_conn = sqlite3.connect(
+        os.path.join(env.config_path, DB_NAME)
+    )
+    _db_conn.row_factory = sqlite3.Row
     return _db_conn
 
 def _init_db():
@@ -60,7 +50,14 @@ def _init_db():
         # commit changes
         conn.commit()
 
-async def poll_new_files(path: str = env.music_path):
+@to_thread
+def file_poll_thread():
+    """Threaded function for polling files"""
+
+    # poll files
+    return poll_new_files()
+
+def poll_new_files(path: str = env.music_path):
     """
     Gets difference of cached files and current files, then adds new files
     Returns: Number of files added
@@ -92,7 +89,7 @@ async def poll_new_files(path: str = env.music_path):
 
         # if directory, step into it
         if entry.is_dir():
-            files_changed += await poll_new_files(entry.path)
+            files_changed += poll_new_files(entry.path)
 
         # if file, add to set
         if entry.is_file(): 
@@ -107,13 +104,12 @@ async def poll_new_files(path: str = env.music_path):
 
     # step 4: add new files to database
     if len(to_be_added) > 0:
-        await add_files_to_db(to_be_added)
+        add_files_to_db(to_be_added)
         return len(to_be_added) + files_changed
     else:
-        #print("No new files found.", path)
         return 0
 
-async def add_files_to_db(file_list):
+def add_files_to_db(file_list):
     """Iterates thru lists and adds file to db"""
 
     # connect to database
