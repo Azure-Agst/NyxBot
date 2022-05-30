@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 
 DB_NAME = 'nyx_music.db'
-CONFIG_MOUNT_PATH = '/var/lib/smbot'
+CONFIG_MOUNT_PATH = '/var/lib/nyxbot'
 MUSIC_MOUNT_PATH = '/mnt/music'
 
 class EnvDict():
