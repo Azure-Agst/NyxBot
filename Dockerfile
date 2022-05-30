@@ -1,5 +1,5 @@
 # Base Image
-FROM python:3
+FROM gorialis/discord.py:minimal
 
 # Labels
 LABEL org.opencontainers.image.authors="me@azureagst.dev"
@@ -8,10 +8,7 @@ LABEL org.opencontainers.image.source="https://github.com/Azure-Agst/NyxBot"
 # Set working dir
 WORKDIR /usr/src/smbot
 
-# Install Packages using APT
-RUN apt update && apt install -y libffi-dev libnacl-dev libsqlite3-dev ffmpeg
-
-# Install Python requirements using PIP
+# Install Python requirements using pip
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
